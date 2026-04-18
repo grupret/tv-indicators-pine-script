@@ -1,0 +1,365 @@
+//@version=5
+indicator("SMC Overlay [Intraday]", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=200)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════════════════════
+i_obLookback = input.int(10,   "OB Lookback",              minval=1,        group="Order Blocks")
+i_obMax      = input.int(5,    "OB Max Display",           minval=1, maxval=20, group="Order Blocks")
+i_swingLB    = input.int(10,   "Swing Lookback",           minval=2,        group="Structure")
+i_atrPeriod  = input.int(14,   "ATR Period",               minval=1,        group="ATR")
+i_atrMult    = input.float(2.0,"ATR Multiplier",           minval=0.1, step=0.1, group="ATR")
+i_volPeriod  = input.int(50,   "Volume Percentile Period", minval=10,       group="Institutional")
+i_tp1_rr     = input.float(1.0,  "TP1 Risk/Reward",        group="Targets", step=0.1)
+i_tp2_rr     = input.float(2.0,  "TP2 Risk/Reward",        group="Targets", step=0.1)
+i_tp3_rr     = input.float(3.0,  "TP3 Risk/Reward",        group="Targets", step=0.1)
+i_showEma9   = input.bool(true,  "Show EMA 9",   group="Moving Averages")
+i_showEma20  = input.bool(true,  "Show EMA 20",  group="Moving Averages")
+i_showEma50  = input.bool(true,  "Show EMA 50",  group="Moving Averages")
+i_showSma200 = input.bool(true,  "Show SMA 200", group="Moving Averages")
+i_showVwap   = input.bool(true,  "Show VWAP Bands", group="Moving Averages")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MOVING AVERAGES
+// ═══════════════════════════════════════════════════════════════════════════════
+ema9   = ta.ema(close, 9)
+ema20  = ta.ema(close, 20)
+ema50  = ta.ema(close, 50)
+sma200 = ta.sma(close, 200)
+
+plot(i_showEma9   ? ema9   : na, "EMA 9",   color=color.yellow, linewidth=1)
+plot(i_showEma20  ? ema20  : na, "EMA 20",  color=color.orange, linewidth=1)
+plot(i_showEma50  ? ema50  : na, "EMA 50",  color=color.blue,   linewidth=2)
+plot(i_showSma200 ? sma200 : na, "SMA 200", color=color.white,  linewidth=2)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VWAP WITH ±1σ AND ±2σ BANDS  (manual — resets each session)
+// ═══════════════════════════════════════════════════════════════════════════════
+var float _cumVP  = 0.0
+var float _cumV   = 0.0
+var float _cumVP2 = 0.0
+
+bool _newDay = ta.change(time("D")) != 0
+if _newDay
+    _cumVP  := 0.0
+    _cumV   := 0.0
+    _cumVP2 := 0.0
+
+_cumVP  += hlc3 * volume
+_cumV   += volume
+_cumVP2 += hlc3 * hlc3 * volume
+
+vwapVal   = _cumV > 0 ? _cumVP / _cumV : hlc3
+_variance = math.max(_cumV > 0 ? _cumVP2 / _cumV - vwapVal * vwapVal : 0.0, 0.0)
+_stdev    = math.sqrt(_variance)
+
+vwapU1 = vwapVal + _stdev
+vwapL1 = vwapVal - _stdev
+vwapU2 = vwapVal + 2.0 * _stdev
+vwapL2 = vwapVal - 2.0 * _stdev
+
+plot(i_showVwap ? vwapVal : na, "VWAP",     color=color.teal,                    linewidth=2)
+plot(i_showVwap ? vwapU1  : na, "VWAP +1σ", color=color.new(color.teal, 55),     linewidth=1)
+plot(i_showVwap ? vwapL1  : na, "VWAP -1σ", color=color.new(color.teal, 55),     linewidth=1)
+plot(i_showVwap ? vwapU2  : na, "VWAP +2σ", color=color.new(color.teal, 75),     linewidth=1)
+plot(i_showVwap ? vwapL2  : na, "VWAP -2σ", color=color.new(color.teal, 75),     linewidth=1)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ATR
+// ═══════════════════════════════════════════════════════════════════════════════
+atrVal = ta.atr(i_atrPeriod)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONFIRMED SWINGS  (pivothigh/low confirmed i_swingLB bars after formation)
+// ═══════════════════════════════════════════════════════════════════════════════
+swingH = ta.pivothigh(high, i_swingLB, i_swingLB)  // confirmed swing high
+swingL = ta.pivotlow(low,   i_swingLB, i_swingLB)  // confirmed swing low
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ORDER BLOCKS
+// ═══════════════════════════════════════════════════════════════════════════════
+// Impulse detected on current (closed) bar vs close i_obLookback bars ago
+bullImpulse = close > close[i_obLookback] + atrVal * i_atrMult
+bearImpulse = close < close[i_obLookback] - atrVal * i_atrMult
+
+// Return index (1..lookback) of most recent bearish candle — becomes bullish OB
+f_lastBearCandle() =>
+    int result = -1
+    for i = 1 to i_obLookback
+        if close[i] < open[i]
+            result := i
+            break
+    result
+
+// Return index of most recent bullish candle — becomes bearish OB
+f_lastBullCandle() =>
+    int result = -1
+    for i = 1 to i_obLookback
+        if close[i] >= open[i]
+            result := i
+            break
+    result
+
+// Compute indices once per bar (avoid redundant calls)
+int bullObIdx = bullImpulse ? f_lastBearCandle() : -1
+int bearObIdx = bearImpulse ? f_lastBullCandle() : -1
+
+var box[] bullOB        = array.new_box()
+var box[] bearOB        = array.new_box()
+var int   lastBullObBar = na
+var int   lastBearObBar = na
+
+if bullObIdx > 0
+    int absBar = bar_index - bullObIdx
+    if na(lastBullObBar) or absBar != lastBullObBar
+        lastBullObBar := absBar
+        if array.size(bullOB) >= i_obMax
+            box.delete(array.shift(bullOB))
+        array.push(bullOB, box.new(
+             bar_index - bullObIdx, high[bullObIdx],
+             bar_index + 20,        low[bullObIdx],
+             border_color = color.new(color.green, 0),
+             bgcolor      = color.new(color.green, 82),
+             border_width = 1))
+
+if bearObIdx > 0
+    int absBar = bar_index - bearObIdx
+    if na(lastBearObBar) or absBar != lastBearObBar
+        lastBearObBar := absBar
+        if array.size(bearOB) >= i_obMax
+            box.delete(array.shift(bearOB))
+        array.push(bearOB, box.new(
+             bar_index - bearObIdx, high[bearObIdx],
+             bar_index + 20,        low[bearObIdx],
+             border_color = color.new(color.red, 0),
+             bgcolor      = color.new(color.red, 82),
+             border_width = 1))
+
+// Extend active OBs rightward and check for touches / invalidation
+bool bullObTouched = false
+bool bearObTouched = false
+
+if array.size(bullOB) > 0
+    int _bi = array.size(bullOB) - 1
+    while _bi >= 0
+        b       = array.get(bullOB, _bi)
+        obTop   = box.get_top(b)
+        obBot   = box.get_bottom(b)
+        box.set_right(b, bar_index + 20)
+        if low <= obTop and low >= obBot
+            bullObTouched := true
+        if close < obBot
+            box.delete(b)
+            array.remove(bullOB, _bi)
+        _bi -= 1
+
+if array.size(bearOB) > 0
+    int _bi = array.size(bearOB) - 1
+    while _bi >= 0
+        b       = array.get(bearOB, _bi)
+        obTop   = box.get_top(b)
+        obBot   = box.get_bottom(b)
+        box.set_right(b, bar_index + 20)
+        if high >= obBot and high <= obTop
+            bearObTouched := true
+        if close > obTop
+            box.delete(b)
+            array.remove(bearOB, _bi)
+        _bi -= 1
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LIQUIDITY SWEEP DETECTION
+// ═══════════════════════════════════════════════════════════════════════════════
+var float lastSH = na
+var float lastSL = na
+
+if not na(swingH)
+    lastSH := swingH
+if not na(swingL)
+    lastSL := swingL
+
+// Wick pierces swing level, close returns inside — no future bar access
+bearSweep = not na(lastSH) and high > lastSH and close < lastSH
+bullSweep = not na(lastSL) and low  < lastSL and close > lastSL
+
+plotshape(bearSweep, "Bear Sweep", shape.triangledown, location.abovebar, color.new(color.red,   0), size=size.small)
+plotshape(bullSweep, "Bull Sweep", shape.triangleup,   location.belowbar, color.new(color.green, 0), size=size.small)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MARKET STRUCTURE — BOS & CHoCH
+// ═══════════════════════════════════════════════════════════════════════════════
+var float msLastSH  = na   // most recent confirmed swing high
+var float msLastSL  = na   // most recent confirmed swing low
+var bool  inUptrend = false // uptrend flag (higher highs)
+var line[] msLines  = array.new_line()
+
+bool bearBOS  = false
+bool chochSig = false
+
+if not na(swingH)
+    // CHoCH: new swing high is LOWER than previous while uptrend was in force
+    if not na(msLastSH) and swingH < msLastSH and inUptrend
+        chochSig  := true
+        inUptrend := false
+    // Higher high resets uptrend flag
+    if not na(msLastSH) and swingH > msLastSH
+        inUptrend := true
+    msLastSH := swingH
+
+if not na(swingL)
+    msLastSL := swingL
+
+// BOS: close crosses below most recent swing low
+if not na(msLastSL)
+    bearBOS := close < msLastSL and close[1] >= msLastSL
+
+if bearBOS
+    if array.size(msLines) >= 30
+        line.delete(array.shift(msLines))
+    array.push(msLines,
+         line.new(bar_index - i_swingLB, msLastSL, bar_index + 10, msLastSL,
+              color=color.red, style=line.style_dashed, width=1))
+    label.new(bar_index, low, "BOS ▼",
+         color=color.red, textcolor=color.white,
+         style=label.style_label_up, size=size.small)
+
+if chochSig
+    // Label at the swing high that formed the CHoCH (i_swingLB bars ago)
+    label.new(bar_index - i_swingLB, msLastSH, "CHoCH",
+         color=color.orange, textcolor=color.white,
+         style=label.style_label_down, size=size.small)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SUPPORT & RESISTANCE  (last 3 swing highs → resistance, last 3 lows → support)
+// ═══════════════════════════════════════════════════════════════════════════════
+var line[]  resLines = array.new_line()
+var float[] resLvls  = array.new_float()
+var line[]  supLines = array.new_line()
+var float[] supLvls  = array.new_float()
+
+if not na(swingH)
+    if array.size(resLvls) >= 3
+        line.delete(array.shift(resLines))
+        array.shift(resLvls)
+    array.push(resLvls, swingH)
+    array.push(resLines,
+         line.new(bar_index - i_swingLB, swingH, bar_index, swingH,
+              color=color.new(color.red, 35), width=1, extend=extend.right))
+
+if not na(swingL)
+    if array.size(supLvls) >= 3
+        line.delete(array.shift(supLines))
+        array.shift(supLvls)
+    array.push(supLvls, swingL)
+    array.push(supLines,
+         line.new(bar_index - i_swingLB, swingL, bar_index, swingL,
+              color=color.new(color.green, 35), width=1, extend=extend.right))
+
+// Prune broken resistance levels (close above)
+int resSz = array.size(resLvls)
+if resSz > 0
+    int _ri = resSz - 1
+    while _ri >= 0
+        if close > array.get(resLvls, _ri)
+            line.delete(array.remove(resLines, _ri))
+            array.remove(resLvls, _ri)
+        _ri -= 1
+
+// Prune broken support levels (close below)
+int supSz = array.size(supLvls)
+if supSz > 0
+    int _si = supSz - 1
+    while _si >= 0
+        if close < array.get(supLvls, _si)
+            line.delete(array.remove(supLines, _si))
+            array.remove(supLvls, _si)
+        _si -= 1
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INSTITUTIONAL LEVELS
+// Condition: volume in top 5th percentile AND candle qualifies as order block
+// ═══════════════════════════════════════════════════════════════════════════════
+float volRank = ta.percentrank(volume, i_volPeriod) // 0–100; ≥95 = top 5%
+bool  highVol = volRank >= 95.0
+
+// Bullish institutional: high vol + bullish impulse + prior bearish candle (OB) found
+bool instBuy  = highVol and bullObIdx > 0
+bool instSell = highVol and bearObIdx > 0
+
+var int lastInstBuyBar  = na
+var int lastInstSellBar = na
+
+if instBuy
+    int absBar = bar_index - bullObIdx
+    if na(lastInstBuyBar) or absBar != lastInstBuyBar
+        lastInstBuyBar := absBar
+        label.new(bar_index - bullObIdx, low[bullObIdx], "INST BUY ▲",
+             color=color.green, textcolor=color.white,
+             style=label.style_label_up, size=size.small)
+        line.new(bar_index - bullObIdx, low[bullObIdx], bar_index + 30, low[bullObIdx],
+             color=color.new(color.green, 0), width=2)
+             
+        // Project SL and TP visually
+        float entryP = close
+        float sl1 = low[bullObIdx]
+        float sl2 = not na(lastSL) ? lastSL : sl1 - atrVal
+        float risk = entryP - sl1 > 0 ? entryP - sl1 : atrVal
+        float tp1 = entryP + risk * i_tp1_rr
+        float tp2 = entryP + risk * i_tp2_rr
+        float tp3 = entryP + risk * i_tp3_rr
+
+        line.new(bar_index, sl1, bar_index + 20, sl1, color=color.new(color.red, 30), style=line.style_dashed, width=1)
+        label.new(bar_index + 20, sl1, "SL1", color=color.new(color.red, 30), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+        line.new(bar_index, sl2, bar_index + 20, sl2, color=color.new(color.maroon, 20), style=line.style_dotted, width=1)
+        label.new(bar_index + 20, sl2, "SL2", color=color.new(color.maroon, 20), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+
+        line.new(bar_index, tp1, bar_index + 20, tp1, color=color.new(color.green, 30), style=line.style_dashed, width=1)
+        label.new(bar_index + 20, tp1, "TP1", color=color.new(color.green, 0), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+        line.new(bar_index, tp2, bar_index + 20, tp2, color=color.new(color.green, 30), style=line.style_dashed, width=1)
+        label.new(bar_index + 20, tp2, "TP2", color=color.new(color.green, 0), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+        line.new(bar_index, tp3, bar_index + 20, tp3, color=color.new(color.green, 30), style=line.style_dashed, width=1)
+        label.new(bar_index + 20, tp3, "TP3", color=color.new(color.green, 0), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+
+if instSell
+    int absBar = bar_index - bearObIdx
+    if na(lastInstSellBar) or absBar != lastInstSellBar
+        lastInstSellBar := absBar
+        label.new(bar_index - bearObIdx, high[bearObIdx], "INST SELL ▼",
+             color=color.red, textcolor=color.white,
+             style=label.style_label_down, size=size.small)
+        line.new(bar_index - bearObIdx, high[bearObIdx], bar_index + 30, high[bearObIdx],
+             color=color.new(color.red, 0), width=2)
+             
+        // Project SL and TP visually
+        float entryP = close
+        float sl1 = high[bearObIdx]
+        float sl2 = not na(lastSH) ? lastSH : sl1 + atrVal
+        float risk = sl1 - entryP > 0 ? sl1 - entryP : atrVal
+        float tp1 = entryP - risk * i_tp1_rr
+        float tp2 = entryP - risk * i_tp2_rr
+        float tp3 = entryP - risk * i_tp3_rr
+
+        line.new(bar_index, sl1, bar_index + 20, sl1, color=color.new(color.red, 30), style=line.style_dashed, width=1)
+        label.new(bar_index + 20, sl1, "SL1", color=color.new(color.red, 30), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+        line.new(bar_index, sl2, bar_index + 20, sl2, color=color.new(color.maroon, 20), style=line.style_dotted, width=1)
+        label.new(bar_index + 20, sl2, "SL2", color=color.new(color.maroon, 20), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+
+        line.new(bar_index, tp1, bar_index + 20, tp1, color=color.new(color.green, 30), style=line.style_dashed, width=1)
+        label.new(bar_index + 20, tp1, "TP1", color=color.new(color.green, 0), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+        line.new(bar_index, tp2, bar_index + 20, tp2, color=color.new(color.green, 30), style=line.style_dashed, width=1)
+        label.new(bar_index + 20, tp2, "TP2", color=color.new(color.green, 0), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+        line.new(bar_index, tp3, bar_index + 20, tp3, color=color.new(color.green, 30), style=line.style_dashed, width=1)
+        label.new(bar_index + 20, tp3, "TP3", color=color.new(color.green, 0), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════════════════════
+alertcondition(bullSweep,    "Bullish Liquidity Sweep",  "Bull sweep: wick pierced swing low, closed above")
+alertcondition(bearSweep,    "Bearish Liquidity Sweep",  "Bear sweep: wick pierced swing high, closed below")
+alertcondition(bullObTouched,"Bullish OB Touch",         "Price entered bullish order block zone")
+alertcondition(bearObTouched,"Bearish OB Touch",         "Price entered bearish order block zone")
+alertcondition(bearBOS,      "Bearish BOS",              "Bearish break of structure: close < swing low")
+alertcondition(chochSig,     "CHoCH",                    "Change of character: lower high confirmed")
+alertcondition(instBuy,      "Institutional Buy",        "High-vol bullish OB impulse detected")
+alertcondition(instSell,     "Institutional Sell",       "High-vol bearish OB impulse detected")
+

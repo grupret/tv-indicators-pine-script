@@ -1,0 +1,131 @@
+//@version=5
+indicator("Order Flow Pane [Intraday]", overlay=false, max_labels_count=300, max_lines_count=100)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════════════════════
+i_hvtMult    = input.float(1.5,  "HVT Multiplier",       minval=1.0, step=0.1, group="HVT")
+i_hvtPeriod  = input.int(20,     "HVT MA Period",         minval=5,             group="HVT")
+i_showCumDelta = input.bool(true, "Show Cumulative Delta", group="Delta")
+i_atrPeriod  = input.int(14,     "ATR Period",            minval=1,             group="Institutional")
+i_atrMult    = input.float(2.0,  "ATR Multiplier",        minval=0.1, step=0.1, group="Institutional")
+i_obLookback = input.int(10,     "OB Lookback",           minval=1,             group="Institutional")
+i_volPeriod  = input.int(50,     "Vol Percentile Period", minval=10,            group="Institutional")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VOLUME DELTA
+// buyVol  = bullish candle volume; sellVol = bearish candle volume
+// ═══════════════════════════════════════════════════════════════════════════════
+float buyVol  = close >= open ? volume : 0.0
+float sellVol = close <  open ? volume : 0.0
+float delta   = buyVol - sellVol
+
+// ─── Cumulative delta (resets each session, normalized as % of cum volume) ───
+var float _cumBuy  = 0.0
+var float _cumSell = 0.0
+
+bool _newDay = ta.change(time("D")) != 0
+if _newDay
+    _cumBuy  := 0.0
+    _cumSell := 0.0
+
+_cumBuy  += buyVol
+_cumSell += sellVol
+
+float cumTotal = _cumBuy + _cumSell
+// Normalize to [-100, +100] as buy/sell imbalance percentage
+float cumDeltaNorm = cumTotal > 0 ? (_cumBuy - _cumSell) / cumTotal * 100.0 : 0.0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HEATMAP COLORING — volume intensity vs rolling average
+// ═══════════════════════════════════════════════════════════════════════════════
+float volAvg = ta.sma(volume, i_hvtPeriod)
+float volRatio = volAvg > 0 ? volume / volAvg : 1.0
+
+// Color tiers based on volume intensity
+color heatColor =
+     volRatio > 2.5 ? color.new(color.red,    10) :
+     volRatio > 1.5 ? color.new(color.orange, 10) :
+     volRatio > 1.0 ? color.new(color.teal,   10) :
+     volRatio > 0.5 ? color.new(color.blue,   30) :
+                      color.new(color.gray,   50)
+
+// ─── Delta histogram (color = heatmap intensity) ──────────────────────────────
+plot(delta, "Volume Delta", style=plot.style_histogram, color=heatColor, linewidth=2)
+
+// Zero line reference
+hline(0, "Zero", color=color.new(color.white, 60), linestyle=hline.style_dashed)
+
+// ─── Cumulative delta line (optional) ─────────────────────────────────────────
+plot(i_showCumDelta ? cumDeltaNorm : na, "Cum Delta %",
+     color=color.new(color.yellow, 0), linewidth=1, style=plot.style_line)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HIGH VOLUME TRADE (HVT) DETECTION
+// ═══════════════════════════════════════════════════════════════════════════════
+bool isHVT = volume > i_hvtMult * volAvg
+
+// Highlight HVT bars: background color
+bgcolor(isHVT ? color.new(color.yellow, 85) : na, title="HVT Background")
+
+// HVT label on delta histogram bar
+if isHVT
+    label.new(bar_index, delta, "HVT",
+         color=color.new(color.yellow, 0), textcolor=color.black,
+         style=delta >= 0 ? label.style_label_up : label.style_label_down, size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INSTITUTIONAL MARKER SYNC (mirrors SMC_Overlay logic)
+// Shows INST BUY / INST SELL on delta pane based on delta sign
+// ═══════════════════════════════════════════════════════════════════════════════
+float atrVal  = ta.atr(i_atrPeriod)
+float volRankPct = ta.percentrank(volume, i_volPeriod) // 0–100
+bool  highVol = volRankPct >= 95.0
+
+bool bullImpulse = close > close[i_obLookback] + atrVal * i_atrMult
+bool bearImpulse = close < close[i_obLookback] - atrVal * i_atrMult
+
+// OB candle confirmation helpers
+f_lastBearCandle() =>
+    int r = -1
+    for i = 1 to i_obLookback
+        if close[i] < open[i]
+            r := i
+            break
+    r
+
+f_lastBullCandle() =>
+    int r = -1
+    for i = 1 to i_obLookback
+        if close[i] >= open[i]
+            r := i
+            break
+    r
+
+int bullObIdx = bullImpulse ? f_lastBearCandle() : -1
+int bearObIdx = bearImpulse ? f_lastBullCandle() : -1
+
+bool instBuy  = highVol and bullObIdx > 0
+bool instSell = highVol and bearObIdx > 0
+
+// Plot on the delta value so markers align with bars
+if instBuy
+    label.new(bar_index, delta, "INST BUY ▲",
+         color=color.green, textcolor=color.white,
+         style=label.style_label_up, size=size.small)
+
+if instSell
+    label.new(bar_index, delta, "INST SELL ▼",
+         color=color.red, textcolor=color.white,
+         style=label.style_label_down, size=size.small)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DISCLOSURE TABLE (drawn once — persistent)
+// ═══════════════════════════════════════════════════════════════════════════════
+var table discTable = table.new(position.bottom_left, 1, 1,
+     bgcolor=color.new(color.orange, 82), frame_color=color.new(color.orange, 50), frame_width=1)
+if barstate.islast
+    table.cell(discTable, 0, 0,
+         "⚠ L2 order book unavailable in Pine Script. Showing volume delta approximation.",
+         text_color=color.new(color.orange, 0), text_size=size.tiny)
+
