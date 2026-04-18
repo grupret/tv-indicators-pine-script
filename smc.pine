@@ -18,6 +18,8 @@ i_showEma20  = input.bool(true,  "Show EMA 20",  group="Moving Averages")
 i_showEma50  = input.bool(true,  "Show EMA 50",  group="Moving Averages")
 i_showSma200 = input.bool(true,  "Show SMA 200", group="Moving Averages")
 i_showVwap   = input.bool(true,  "Show VWAP Bands", group="Moving Averages")
+i_useHtfFilter = input.bool(false, "Use HTF Trend Filter for OBs", group="Structure")
+i_htfTimeframe = input.timeframe("240", "HTF Timeframe (e.g. 240 for 4H)", group="Structure")
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // MOVING AVERAGES
@@ -33,21 +35,13 @@ plot(i_showEma50  ? ema50  : na, "EMA 50",  color=color.blue,   linewidth=2)
 plot(i_showSma200 ? sma200 : na, "SMA 200", color=color.white,  linewidth=2)
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// VWAP WITH ±1σ AND ±2σ BANDS  (manual — resets each session)
+// VWAP WITH ±1σ AND ±2σ BANDS  (Rolling 24-Hour window for Crypto)
 // ═══════════════════════════════════════════════════════════════════════════════
-var float _cumVP  = 0.0
-var float _cumV   = 0.0
-var float _cumVP2 = 0.0
+int barsIn24H = timeframe.isintraday ? math.max(1, math.round(86400 / timeframe.in_seconds(""))) : 1
 
-bool _newDay = ta.change(time("D")) != 0
-if _newDay
-    _cumVP  := 0.0
-    _cumV   := 0.0
-    _cumVP2 := 0.0
-
-_cumVP  += hlc3 * volume
-_cumV   += volume
-_cumVP2 += hlc3 * hlc3 * volume
+float _cumVP  = math.sum(hlc3 * volume, barsIn24H)
+float _cumV   = math.sum(volume, barsIn24H)
+float _cumVP2 = math.sum(hlc3 * hlc3 * volume, barsIn24H)
 
 vwapVal   = _cumV > 0 ? _cumVP / _cumV : hlc3
 _variance = math.max(_cumV > 0 ? _cumVP2 / _cumV - vwapVal * vwapVal : 0.0, 0.0)
@@ -76,11 +70,17 @@ swingH = ta.pivothigh(high, i_swingLB, i_swingLB)  // confirmed swing high
 swingL = ta.pivotlow(low,   i_swingLB, i_swingLB)  // confirmed swing low
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ORDER BLOCKS
 // ═══════════════════════════════════════════════════════════════════════════════
+// ORDER BLOCKS & HTF TREND BIAS
+// ═══════════════════════════════════════════════════════════════════════════════
+// Get HTF Trend (using 50 EMA as proxy for trend on the selected higher timeframe)
+float htfEma = request.security(syminfo.tickerid, i_htfTimeframe, ta.ema(close, 50))
+bool htfBull = close > htfEma
+bool htfBear = close < htfEma
+
 // Impulse detected on current (closed) bar vs close i_obLookback bars ago
-bullImpulse = close > close[i_obLookback] + atrVal * i_atrMult
-bearImpulse = close < close[i_obLookback] - atrVal * i_atrMult
+bullImpulse = (close > close[i_obLookback] + atrVal * i_atrMult) and (not i_useHtfFilter or htfBull)
+bearImpulse = (close < close[i_obLookback] - atrVal * i_atrMult) and (not i_useHtfFilter or htfBear)
 
 // Return index (1..lookback) of most recent bearish candle — becomes bullish OB
 f_lastBearCandle() =>

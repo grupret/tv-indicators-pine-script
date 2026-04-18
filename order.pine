@@ -20,17 +20,12 @@ float buyVol  = close >= open ? volume : 0.0
 float sellVol = close <  open ? volume : 0.0
 float delta   = buyVol - sellVol
 
-// ─── Cumulative delta (resets each session, normalized as % of cum volume) ───
-var float _cumBuy  = 0.0
-var float _cumSell = 0.0
+// ─── Cumulative delta (Rolling 24-Hour window for Crypto, normalized as % of cum volume) ───
+// Calculate number of bars in 24 hours based on the current timeframe
+int barsIn24H = timeframe.isintraday ? math.max(1, math.round(86400 / timeframe.in_seconds(""))) : 1
 
-bool _newDay = ta.change(time("D")) != 0
-if _newDay
-    _cumBuy  := 0.0
-    _cumSell := 0.0
-
-_cumBuy  += buyVol
-_cumSell += sellVol
+float _cumBuy  = math.sum(buyVol, barsIn24H)
+float _cumSell = math.sum(sellVol, barsIn24H)
 
 float cumTotal = _cumBuy + _cumSell
 // Normalize to [-100, +100] as buy/sell imbalance percentage
