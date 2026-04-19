@@ -1,4 +1,4 @@
-//@version=5
+//@version=6
 indicator("Order Flow Pane [Intraday]", overlay=false, max_labels_count=300, max_lines_count=100)
 
 // ═══════════════════════════════════════════════════════════════════════════════

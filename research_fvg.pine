@@ -1,0 +1,8 @@
+//@version=6
+indicator("FVG Research", overlay=true)
+// Fair Value Gap logic
+bullFVG = low > high[2]
+bearFVG = high < low[2]
+
+plotshape(bullFVG, "Bull FVG", shape.triangleup, location.belowbar, color.green)
+plotshape(bearFVG, "Bear FVG", shape.triangledown, location.abovebar, color.red)

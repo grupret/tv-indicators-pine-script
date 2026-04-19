@@ -1,4 +1,4 @@
-//@version=5
+//@version=6
 indicator("SMC Overlay [Intraday]", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=200)
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -7,17 +7,40 @@ indicator("SMC Overlay [Intraday]", overlay=true, max_labels_count=500, max_line
 i_obLookback = input.int(10,   "OB Lookback",              minval=1,        group="Order Blocks")
 i_obMax      = input.int(5,    "OB Max Display",           minval=1, maxval=20, group="Order Blocks")
 i_swingLB    = input.int(10,   "Swing Lookback",           minval=2,        group="Structure")
+
+// --- Supply & Demand (S&D) ---
+i_showSD     = input.bool(true,  "Show S&D Lines",          group="Supply & Demand")
+i_srcSD      = input.string("OB", "S&D Source", options=["OB", "Swing"], group="Supply & Demand")
+
+// --- Institutional / Bookmap ---
+i_volPeriod  = input.int(50,   "Volume Percentile Period", minval=10,       group="Institutional")
+i_hvtMult    = input.float(2.5,  "High Vol (Large Lot) Mult", minval=1.0, step=0.1, group="Institutional")
+i_showHeat   = input.bool(true,  "Show Bookmap Heatmap",    group="Institutional")
+
+// --- Signals ---
+i_showCross  = input.bool(true,  "Show EMA/VWAP Signals",   group="Signals")
+i_confirmVol = input.bool(true,  "Confirm with High Vol",   group="Signals")
+i_showSweepOb= input.bool(true,  "Show Sweep + OB Signals", group="Signals")
+
+// --- Existing ATR/Targets ---
 i_atrPeriod  = input.int(14,   "ATR Period",               minval=1,        group="ATR")
 i_atrMult    = input.float(2.0,"ATR Multiplier",           minval=0.1, step=0.1, group="ATR")
-i_volPeriod  = input.int(50,   "Volume Percentile Period", minval=10,       group="Institutional")
 i_tp1_rr     = input.float(1.0,  "TP1 Risk/Reward",        group="Targets", step=0.1)
 i_tp2_rr     = input.float(2.0,  "TP2 Risk/Reward",        group="Targets", step=0.1)
 i_tp3_rr     = input.float(3.0,  "TP3 Risk/Reward",        group="Targets", step=0.1)
+
 i_showEma9   = input.bool(true,  "Show EMA 9",   group="Moving Averages")
 i_showEma20  = input.bool(true,  "Show EMA 20",  group="Moving Averages")
 i_showEma50  = input.bool(true,  "Show EMA 50",  group="Moving Averages")
 i_showSma200 = input.bool(true,  "Show SMA 200", group="Moving Averages")
 i_showVwap   = input.bool(true,  "Show VWAP Bands", group="Moving Averages")
+
+// --- Fair Value Gaps (FVG) ---
+i_showFvg    = input.bool(true,  "Show FVGs",               group="Supply & Demand")
+i_fvgMinSize = input.float(0.5,  "FVG Min ATR Multiplier",  group="Supply & Demand", step=0.1)
+
+// --- Cumulative Delta ---
+i_showCumDelta = input.bool(true, "Show Cumulative Delta Line", group="Institutional")
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // MOVING AVERAGES
@@ -63,6 +86,26 @@ plot(i_showVwap ? vwapU1  : na, "VWAP +1σ", color=color.new(color.teal, 55),   
 plot(i_showVwap ? vwapL1  : na, "VWAP -1σ", color=color.new(color.teal, 55),     linewidth=1)
 plot(i_showVwap ? vwapU2  : na, "VWAP +2σ", color=color.new(color.teal, 75),     linewidth=1)
 plot(i_showVwap ? vwapL2  : na, "VWAP -2σ", color=color.new(color.teal, 75),     linewidth=1)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BOOKMAP HEATMAP & LARGE LOT DETECTION (Volume Delta approximation)
+// ═══════════════════════════════════════════════════════════════════════════════
+volAvg = ta.sma(volume, 50)
+volRatio = volume / volAvg
+isLargeLot = volRatio >= i_hvtMult
+
+// Heatmap coloring based on volume intensity
+color bookmapColor = 
+     volRatio > 3.0 ? color.new(color.red,    0) :
+     volRatio > 2.0 ? color.new(color.orange, 0) :
+     volRatio > 1.5 ? color.new(color.yellow, 0) :
+     volRatio > 1.0 ? color.new(color.teal,   0) :
+                      color.new(color.gray,   50)
+
+barcolor(i_showHeat ? bookmapColor : na, title="Bookmap Heatmap")
+
+if isLargeLot
+    label.new(bar_index, high, "WHALE", color=color.new(color.purple, 0), textcolor=color.white, style=label.style_label_down, size=size.tiny)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ATR
@@ -168,6 +211,71 @@ if array.size(bearOB) > 0
         _bi -= 1
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// UNMITIGATED S&D LINES
+// ═══════════════════════════════════════════════════════════════════════════════
+var line bullSdLine = na
+var line bearSdLine = na
+
+if i_showSD
+    if array.size(bullOB) > 0
+        bBull = array.get(bullOB, array.size(bullOB)-1)
+        top   = box.get_top(bBull)
+        if na(bullSdLine)
+            bullSdLine := line.new(bar_index, top, bar_index + 10, top, color=color.new(color.green, 20), style=line.style_solid, width=2, extend=extend.right)
+        else
+            line.set_xy1(bullSdLine, bar_index, top)
+            line.set_xy2(bullSdLine, bar_index + 10, top)
+    else
+        line.delete(bullSdLine)
+        bullSdLine := na
+    
+    if array.size(bearOB) > 0
+        bBear = array.get(bearOB, array.size(bearOB)-1)
+        bot   = box.get_bottom(bBear)
+        if na(bearSdLine)
+            bearSdLine := line.new(bar_index, bot, bar_index + 10, bot, color=color.new(color.red, 20), style=line.style_solid, width=2, extend=extend.right)
+        else
+            line.set_xy1(bearSdLine, bar_index, bot)
+            line.set_xy2(bearSdLine, bar_index + 10, bot)
+    else
+        line.delete(bearSdLine)
+        bearSdLine := na
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FAIR VALUE GAPS (FVG / IMBALANCE)
+// ═══════════════════════════════════════════════════════════════════════════════
+var box[] bullFVG = array.new_box()
+var box[] bearFVG = array.new_box()
+
+isBullFVG = low > high[2] and (low - high[2] > atrVal * i_fvgMinSize)
+isBearFVG = high < low[2] and (low[2] - high > atrVal * i_fvgMinSize)
+
+if i_showFvg
+    if isBullFVG
+        array.push(bullFVG, box.new(bar_index[2], low, bar_index, high[2], bgcolor=color.new(color.green, 90), border_color=na))
+    if isBearFVG
+        array.push(bearFVG, box.new(bar_index[2], low[2], bar_index, high, bgcolor=color.new(color.red, 90), border_color=na))
+
+// Clean mitigated FVGs
+if array.size(bullFVG) > 0
+    for i = array.size(bullFVG)-1 to 0
+        b = array.get(bullFVG, i)
+        if low < box.get_bottom(b)
+            box.delete(b)
+            array.remove(bullFVG, i)
+        else
+            box.set_right(b, bar_index + 2)
+
+if array.size(bearFVG) > 0
+    for i = array.size(bearFVG)-1 to 0
+        b = array.get(bearFVG, i)
+        if high > box.get_top(b)
+            box.delete(b)
+            array.remove(bearFVG, i)
+        else
+            box.set_right(b, bar_index + 2)
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // LIQUIDITY SWEEP DETECTION
 // ═══════════════════════════════════════════════════════════════════════════════
 var float lastSH = na
@@ -182,8 +290,8 @@ if not na(swingL)
 bearSweep = not na(lastSH) and high > lastSH and close < lastSH
 bullSweep = not na(lastSL) and low  < lastSL and close > lastSL
 
-plotshape(bearSweep, "Bear Sweep", shape.triangledown, location.abovebar, color.new(color.red,   0), size=size.small)
-plotshape(bullSweep, "Bull Sweep", shape.triangleup,   location.belowbar, color.new(color.green, 0), size=size.small)
+plotshape(bearSweep, "Bear Sweep", style=shape.triangledown, location=location.abovebar, color=color.new(color.red,   0), size=size.small)
+plotshape(bullSweep, "Bull Sweep", style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 0), size=size.small)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // MARKET STRUCTURE — BOS & CHoCH
@@ -209,9 +317,12 @@ if not na(swingH)
 if not na(swingL)
     msLastSL := swingL
 
-// BOS: close crosses below most recent swing low
+// BOS: close crosses swing low (Bearish) or swing high (Bullish)
 if not na(msLastSL)
     bearBOS := close < msLastSL and close[1] >= msLastSL
+bool bullBOS = false
+if not na(msLastSH)
+    bullBOS := close > msLastSH and close[1] <= msLastSH
 
 if bearBOS
     if array.size(msLines) >= 30
@@ -219,15 +330,20 @@ if bearBOS
     array.push(msLines,
          line.new(bar_index - i_swingLB, msLastSL, bar_index + 10, msLastSL,
               color=color.red, style=line.style_dashed, width=1))
-    label.new(bar_index, low, "BOS ▼",
-         color=color.red, textcolor=color.white,
-         style=label.style_label_up, size=size.small)
+
+if bullBOS
+    if array.size(msLines) >= 30
+        line.delete(array.shift(msLines))
+    array.push(msLines,
+         line.new(bar_index - i_swingLB, msLastSH, bar_index + 10, msLastSH,
+              color=color.green, style=line.style_dashed, width=1))
 
 if chochSig
-    // Label at the swing high that formed the CHoCH (i_swingLB bars ago)
-    label.new(bar_index - i_swingLB, msLastSH, "CHoCH",
-         color=color.orange, textcolor=color.white,
-         style=label.style_label_down, size=size.small)
+    if array.size(msLines) >= 30
+        line.delete(array.shift(msLines))
+    array.push(msLines,
+         line.new(bar_index - i_swingLB, msLastSH, bar_index + 10, msLastSH,
+              color=color.orange, style=line.style_solid, width=2))
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SUPPORT & RESISTANCE  (last 3 swing highs → resistance, last 3 lows → support)
@@ -274,6 +390,66 @@ if supSz > 0
             line.delete(array.remove(supLines, _si))
             array.remove(supLvls, _si)
         _si -= 1
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EMA / VWAP CROSSOVER SIGNALS
+// ═══════════════════════════════════════════════════════════════════════════════
+emaCrossUp = ta.crossover(ema9, ema20)
+emaCrossDn = ta.crossunder(ema9, ema20)
+
+// Institutional Filter: Buy only above VWAP in uptrend, Sell below VWAP in downtrend
+// Or as requested, unified with high volume
+// Refined Filter: EMA crossover MUST occur with structural confirmation (BOS/CHoCH) and high volume
+var int lastStructureBar = -100
+if bearBOS or chochSig // Simplified structure check
+    lastStructureBar := bar_index
+
+float volRankPct = ta.percentrank(volume, i_volPeriod)
+bool highVolConfirm = volRankPct >= 95.0
+
+structureConfirm = (bar_index - lastStructureBar <= 10)
+
+buySignal  = i_showCross and emaCrossUp and structureConfirm and highVolConfirm and close > vwapVal
+sellSignal = i_showCross and emaCrossDn and structureConfirm and highVolConfirm and close < vwapVal
+
+plotshape(buySignal,  "Buy Signal",  style=shape.labelup,   location=location.belowbar, color=color.new(color.blue, 0),  size=size.small, text="BUY",  textcolor=color.white)
+plotshape(sellSignal, "Sell Signal", style=shape.labeldown, location=location.abovebar, color=color.new(color.maroon, 0), size=size.small, text="SELL", textcolor=color.white)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// REAL ORDERS TRACKING (Session Delta)
+// ═══════════════════════════════════════════════════════════════════════════════
+var float sessionBuyVol  = 0.0
+var float sessionSellVol = 0.0
+
+if _newDay
+    sessionBuyVol  := 0.0
+    sessionSellVol := 0.0
+
+sessionBuyVol  += (close >= open ? volume : 0.0)
+sessionSellVol += (close <  open ? volume : 0.0)
+sessionDelta    = sessionBuyVol - sessionSellVol
+sessionDeltaPct = (sessionBuyVol + sessionSellVol) > 0 ? (sessionDelta / (sessionBuyVol + sessionSellVol) * 100) : 0.0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CUMULATIVE DELTA LINE (Scaled for overlay)
+// ═══════════════════════════════════════════════════════════════════════════════
+// We scale the delta percentage to fit between VWAP bands for visual context
+deltaPlotLine = vwapVal + (sessionDeltaPct / 100 * (vwapU1 - vwapVal))
+plot(i_showCumDelta ? deltaPlotLine : na, "Cum Delta Plot", color=color.new(color.yellow, 30), linewidth=1, style=plot.style_linebr)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LIQUIDITY SWEEP + OB (A+ SETUP)
+// ═══════════════════════════════════════════════════════════════════════════════
+var int lastSweepBar = -100
+if bullSweep or bearSweep
+    lastSweepBar := bar_index
+
+// A+ Bullish: Sweep happened within last 5 bars AND we are in a Bullish OB
+aPlusBull = i_showSweepOb and (bar_index - lastSweepBar <= 5) and bullObTouched and bullSweep[bar_index - lastSweepBar]
+aPlusBear = i_showSweepOb and (bar_index - lastSweepBar <= 5) and bearObTouched and bearSweep[bar_index - lastSweepBar]
+
+plotchar(aPlusBull, "A+ Bull Setup", char='★', location=location.belowbar, color=color.new(color.yellow, 0), size=size.normal, text="A+ BUY", textcolor=color.black)
+plotchar(aPlusBear, "A+ Bear Setup", char='★', location=location.abovebar, color=color.new(color.yellow, 0), size=size.normal, text="A+ SELL", textcolor=color.black)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // INSTITUTIONAL LEVELS
@@ -362,4 +538,19 @@ alertcondition(bearBOS,      "Bearish BOS",              "Bearish break of struc
 alertcondition(chochSig,     "CHoCH",                    "Change of character: lower high confirmed")
 alertcondition(instBuy,      "Institutional Buy",        "High-vol bullish OB impulse detected")
 alertcondition(instSell,     "Institutional Sell",       "High-vol bearish OB impulse detected")
+alertcondition(buySignal,    "EMA/VWAP Buy Signal",      "EMA 9/20 cross + VWAP filter Buy")
+alertcondition(sellSignal,   "EMA/VWAP Sell Signal",     "EMA 9/20 cross + VWAP filter Sell")
+alertcondition(aPlusBull,    "A+ Bullish Setup",         "Sweep + OB Touch Bullish")
+alertcondition(aPlusBear,    "A+ Bearish Setup",         "Sweep + OB Touch Bearish")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// REAL ORDERS TRACKING (Session Delta Table)
+// ═══════════════════════════════════════════════════════════════════════════════
+var table deltaTable = table.new(position.bottom_right, 2, 2, bgcolor=color.new(color.black, 50), border_width=1, border_color=color.gray)
+if barstate.islast
+    color deltaCol = sessionDelta >= 0 ? color.green : color.red
+    table.cell(deltaTable, 0, 0, "Session Delta", text_color=color.white, text_size=size.small)
+    table.cell(deltaTable, 1, 0, str.tostring(sessionDelta, "#.##"), text_color=deltaCol, text_size=size.small)
+    table.cell(deltaTable, 0, 1, "Delta %", text_color=color.white, text_size=size.small)
+    table.cell(deltaTable, 1, 1, str.tostring(sessionDeltaPct, "#.##") + "%", text_color=deltaCol, text_size=size.small)
 
