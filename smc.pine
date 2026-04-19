@@ -25,9 +25,9 @@ i_showSweepOb= input.bool(true,  "Show Sweep + OB Signals", group="Signals")
 // --- Existing ATR/Targets ---
 i_atrPeriod  = input.int(14,   "ATR Period",               minval=1,        group="ATR")
 i_atrMult    = input.float(2.0,"ATR Multiplier",           minval=0.1, step=0.1, group="ATR")
-i_tp1_rr     = input.float(1.0,  "TP1 Risk/Reward",        group="Targets", step=0.1)
-i_tp2_rr     = input.float(2.0,  "TP2 Risk/Reward",        group="Targets", step=0.1)
-i_tp3_rr     = input.float(3.0,  "TP3 Risk/Reward",        group="Targets", step=0.1)
+i_tp1_rr     = input.float(1.0,  "TP1 RR (Fallback)",     group="Targets", step=0.1)
+i_tp2_rr     = input.float(2.0,  "TP2 RR (Fallback)",     group="Targets", step=0.1)
+i_targetSnap = input.bool(true,  "Snap targets to MM Layers", group="Targets")
 
 i_showEma9   = input.bool(true,  "Show EMA 9",   group="Moving Averages")
 i_showEma20  = input.bool(true,  "Show EMA 20",  group="Moving Averages")
@@ -41,6 +41,12 @@ i_fvgMinSize = input.float(0.5,  "FVG Min ATR Multiplier",  group="Supply & Dema
 
 // --- Cumulative Delta ---
 i_showCumDelta = input.bool(true, "Show Cumulative Delta Line", group="Institutional")
+
+// --- Market Maker Models (MMXM) ---
+i_showMM     = input.bool(true,  "Show MM Blocks (Breaker/Mitigation)", group="Market Maker")
+i_eqTolerance = input.float(0.1, "Equal H/L Tolerance %", minval=0.01, step=0.01, group="Market Maker")
+i_mmMax      = input.int(3,    "Max MM Blocks", minval=1, maxval=10, group="Market Maker")
+i_showDensity= input.bool(true, "Show Density Bubbles", group="Market Maker")
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // MOVING AVERAGES
@@ -107,6 +113,33 @@ barcolor(i_showHeat ? bookmapColor : na, title="Bookmap Heatmap")
 if isLargeLot
     label.new(bar_index, high, "WHALE", color=color.new(color.purple, 0), textcolor=color.white, style=label.style_label_down, size=size.tiny)
 
+// --- Volume Density Engine ---
+var float[] volBins = array.new_float(50, 0.0)
+var float   binsMin = na
+var float   binsMax = na
+
+if _newDay
+    array.fill(volBins, 0.0)
+    binsMin := low
+    binsMax := high
+
+if not na(binsMin) and not na(binsMax)
+    float sessionRange = binsMax - binsMin
+    if sessionRange > 0
+        int binIdx = int((close - binsMin) / sessionRange * 49)
+        binIdx := math.max(0, math.min(binIdx, 49))
+        array.set(volBins, binIdx, array.get(volBins, binIdx) + volume)
+
+// Draw Density Bubbles at HVNs
+if i_showDensity and barstate.islast
+    float maxVol = array.max(volBins)
+    if maxVol > 0
+        for i = 0 to 49
+            float bVol = array.get(volBins, i)
+            if bVol > maxVol * 0.7 // Top density nodes
+                float bPrice = binsMin + (i / 49 * (binsMax - binsMin))
+                label.new(bar_index + 2, bPrice, "●", color=color.new(color.white, 100), textcolor=color.new(color.teal, 40), size=size.normal)
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // ATR
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -117,6 +150,71 @@ atrVal = ta.atr(i_atrPeriod)
 // ═══════════════════════════════════════════════════════════════════════════════
 swingH = ta.pivothigh(high, i_swingLB, i_swingLB)  // confirmed swing high
 swingL = ta.pivotlow(low,   i_swingLB, i_swingLB)  // confirmed swing low
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LIQUIDITY SWEEP DETECTION
+// ═══════════════════════════════════════════════════════════════════════════════
+var float lastSH = na
+var float lastSL = na
+
+// MM Engineered Liquidity (EQH / EQL)
+var float prevSH = na
+var float prevSL = na
+var line[] eqhLines = array.new_line()
+var line[] eqlLines = array.new_line()
+bool isEQH = false
+bool isEQL = false
+
+if not na(swingH)
+    if not na(prevSH)
+        diff = math.abs(swingH - prevSH) / prevSH * 100
+        if diff <= i_eqTolerance
+            isEQH := true
+            if array.size(eqhLines) >= 5
+                line.delete(array.shift(eqhLines))
+            array.push(eqhLines, line.new(bar_index - i_swingLB, swingH, bar_index + 10, swingH, color=color.new(color.red, 30), width=1, style=line.style_dotted, extend=extend.right))
+    prevSH := swingH
+
+if not na(swingL)
+    if not na(prevSL)
+        diff = math.abs(swingL - prevSL) / prevSL * 100
+        if diff <= i_eqTolerance
+            isEQL := true
+            if array.size(eqlLines) >= 5
+                line.delete(array.shift(eqlLines))
+            array.push(eqlLines, line.new(bar_index - i_swingLB, swingL, bar_index + 10, swingL, color=color.new(color.green, 30), width=1, style=line.style_dotted, extend=extend.right))
+    prevSL := swingL
+
+// Clean EQH/EQL lines once swept
+if array.size(eqhLines) > 0
+    for i = array.size(eqhLines)-1 to 0
+        l = array.get(eqhLines, i)
+        if high > line.get_y1(l)
+            line.delete(l)
+            array.remove(eqhLines, i)
+        else
+            line.set_x2(l, bar_index + 10)
+
+if array.size(eqlLines) > 0
+    for i = array.size(eqlLines)-1 to 0
+        l = array.get(eqlLines, i)
+        if low < line.get_y1(l)
+            line.delete(l)
+            array.remove(eqlLines, i)
+        else
+            line.set_x2(l, bar_index + 10)
+
+if not na(swingH)
+    lastSH := swingH
+if not na(swingL)
+    lastSL := swingL
+
+// Wick pierces swing level, close returns inside — no future bar access
+bearSweep = not na(lastSH) and high > lastSH and close < lastSH
+bullSweep = not na(lastSL) and low  < lastSL and close > lastSL
+
+plotshape(bearSweep, "Bear Sweep", style=shape.triangledown, location=location.abovebar, color=color.new(color.red,   0), size=size.small)
+plotshape(bullSweep, "Bull Sweep", style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 0), size=size.small)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ORDER BLOCKS
@@ -151,6 +249,10 @@ var box[] bullOB        = array.new_box()
 var box[] bearOB        = array.new_box()
 var int   lastBullObBar = na
 var int   lastBearObBar = na
+
+// MM Blocks (Breakers & Mitigations)
+var line[] bullMM = array.new_line()
+var line[] bearMM = array.new_line()
 
 if bullObIdx > 0
     int absBar = bar_index - bullObIdx
@@ -192,6 +294,23 @@ if array.size(bullOB) > 0
         if low <= obTop and low >= obBot
             bullObTouched := true
         if close < obBot
+            // OB Broken -> check for Breaker vs Mitigation
+            if i_showMM
+                bool isBreaker = false
+                // Check if a sweep happened within the last 15 bars
+                for j = 0 to 15
+                    if bullSweep[j]
+                        isBreaker := true
+                        break
+                
+                if array.size(bullMM) >= i_mmMax
+                    line.delete(array.shift(bullMM))
+                
+                color mmCol = isBreaker ? color.new(color.orange, 0) : color.new(color.gray, 30)
+                int mmWidth = isBreaker ? 2 : 1
+                array.push(bullMM, line.new(bar_index, obBot, bar_index + 20, obBot, color=mmCol, width=mmWidth, style=line.style_solid, extend=extend.right))
+                label.new(bar_index, obBot, isBreaker ? "BREAKER" : "MITIGATION", color=color.new(mmCol, 50), textcolor=color.white, style=label.style_label_up, size=size.tiny)
+
             box.delete(b)
             array.remove(bullOB, _bi)
         _bi -= 1
@@ -206,6 +325,22 @@ if array.size(bearOB) > 0
         if high >= obBot and high <= obTop
             bearObTouched := true
         if close > obTop
+            // OB Broken -> check for Breaker vs Mitigation
+            if i_showMM
+                bool isBreaker = false
+                for j = 0 to 15
+                    if bearSweep[j]
+                        isBreaker := true
+                        break
+                
+                if array.size(bearMM) >= i_mmMax
+                    line.delete(array.shift(bearMM))
+                
+                color mmCol = isBreaker ? color.new(color.orange, 0) : color.new(color.gray, 30)
+                int mmWidth = isBreaker ? 2 : 1
+                array.push(bearMM, line.new(bar_index, obTop, bar_index + 20, obTop, color=mmCol, width=mmWidth, style=line.style_solid, extend=extend.right))
+                label.new(bar_index, obTop, isBreaker ? "BREAKER" : "MITIGATION", color=color.new(mmCol, 50), textcolor=color.white, style=label.style_label_down, size=size.tiny)
+
             box.delete(b)
             array.remove(bearOB, _bi)
         _bi -= 1
@@ -274,24 +409,6 @@ if array.size(bearFVG) > 0
             array.remove(bearFVG, i)
         else
             box.set_right(b, bar_index + 2)
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// LIQUIDITY SWEEP DETECTION
-// ═══════════════════════════════════════════════════════════════════════════════
-var float lastSH = na
-var float lastSL = na
-
-if not na(swingH)
-    lastSH := swingH
-if not na(swingL)
-    lastSL := swingL
-
-// Wick pierces swing level, close returns inside — no future bar access
-bearSweep = not na(lastSH) and high > lastSH and close < lastSH
-bullSweep = not na(lastSL) and low  < lastSL and close > lastSL
-
-plotshape(bearSweep, "Bear Sweep", style=shape.triangledown, location=location.abovebar, color=color.new(color.red,   0), size=size.small)
-plotshape(bullSweep, "Bull Sweep", style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 0), size=size.small)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // MARKET STRUCTURE — BOS & CHoCH
@@ -452,6 +569,16 @@ plotchar(aPlusBull, "A+ Bull Setup", char='★', location=location.belowbar, col
 plotchar(aPlusBear, "A+ Bear Setup", char='★', location=location.abovebar, color=color.new(color.yellow, 0), size=size.normal, text="A+ SELL", textcolor=color.black)
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// SMART MONEY REVERSAL (SMR) - MMXM
+// ═══════════════════════════════════════════════════════════════════════════════
+// SMR is early confirmation of a Market Maker Buy/Sell Model reversal
+bool smrBuy  = bullSweep and close > high[1] // Sweep then aggressive close above
+bool smrSell = bearSweep and close < low[1]   // Sweep then aggressive close below
+
+plotshape(i_showMM and smrBuy,  "SMR Buy",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.lime, 0), size=size.small, text="SMR (MMBM)",  textcolor=color.white)
+plotshape(i_showMM and smrSell, "SMR Sell", style=shape.triangledown, location=location.abovebar, color=color.new(color.fuchsia, 0), size=size.small, text="SMR (MMSM)", textcolor=color.white)
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // INSTITUTIONAL LEVELS
 // Condition: volume in top 5th percentile AND candle qualifies as order block
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -480,21 +607,36 @@ if instBuy
         float sl1 = low[bullObIdx]
         float sl2 = not na(lastSL) ? lastSL : sl1 - atrVal
         float risk = entryP - sl1 > 0 ? entryP - sl1 : atrVal
-        float tp1 = entryP + risk * i_tp1_rr
-        float tp2 = entryP + risk * i_tp2_rr
-        float tp3 = entryP + risk * i_tp3_rr
 
         line.new(bar_index, sl1, bar_index + 20, sl1, color=color.new(color.red, 30), style=line.style_dashed, width=1)
         label.new(bar_index + 20, sl1, "SL1", color=color.new(color.red, 30), textcolor=color.white, style=label.style_label_left, size=size.tiny)
         line.new(bar_index, sl2, bar_index + 20, sl2, color=color.new(color.maroon, 20), style=line.style_dotted, width=1)
         label.new(bar_index + 20, sl2, "SL2", color=color.new(color.maroon, 20), textcolor=color.white, style=label.style_label_left, size=size.tiny)
 
-        line.new(bar_index, tp1, bar_index + 20, tp1, color=color.new(color.green, 30), style=line.style_dashed, width=1)
-        label.new(bar_index + 20, tp1, "TP1", color=color.new(color.green, 0), textcolor=color.white, style=label.style_label_left, size=size.tiny)
-        line.new(bar_index, tp2, bar_index + 20, tp2, color=color.new(color.green, 30), style=line.style_dashed, width=1)
-        label.new(bar_index + 20, tp2, "TP2", color=color.new(color.green, 0), textcolor=color.white, style=label.style_label_left, size=size.tiny)
-        line.new(bar_index, tp3, bar_index + 20, tp3, color=color.new(color.green, 30), style=line.style_dashed, width=1)
-        label.new(bar_index + 20, tp3, "TP3", color=color.new(color.green, 0), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+        // Target Snapping Logic
+        float targetTP1 = entryP + risk * i_tp1_rr
+        float targetTP2 = entryP + risk * i_tp2_rr
+        
+        if i_targetSnap
+            // Scan for nearest MM Line or HVN above entry
+            float closestHVN = na
+            float maxDen = array.max(volBins)
+            for i = 0 to 49
+                if array.get(volBins, i) > maxDen * 0.7
+                    float p = binsMin + (i / 49 * (binsMax - binsMin))
+                    if p > entryP and (na(closestHVN) or p < closestHVN)
+                        closestHVN := p
+            
+            if not na(closestHVN)
+                targetTP1 := closestHVN
+            
+            // TP2 targets next major MM line (simulated here by 2x HVN step or POC)
+            targetTP2 := math.max(targetTP2, targetTP1 + risk)
+
+        line.new(bar_index, targetTP1, bar_index + 20, targetTP1, color=color.new(color.green, 30), style=line.style_dashed, width=1)
+        label.new(bar_index + 20, targetTP1, "TP1 (LVL)", color=color.new(color.green, 0), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+        line.new(bar_index, targetTP2, bar_index + 20, targetTP2, color=color.new(color.green, 30), style=line.style_dashed, width=1)
+        label.new(bar_index + 20, targetTP2, "TP2 (ZONE)", color=color.new(color.green, 0), textcolor=color.white, style=label.style_label_left, size=size.tiny)
 
 if instSell
     int absBar = bar_index - bearObIdx
@@ -511,21 +653,34 @@ if instSell
         float sl1 = high[bearObIdx]
         float sl2 = not na(lastSH) ? lastSH : sl1 + atrVal
         float risk = sl1 - entryP > 0 ? sl1 - entryP : atrVal
-        float tp1 = entryP - risk * i_tp1_rr
-        float tp2 = entryP - risk * i_tp2_rr
-        float tp3 = entryP - risk * i_tp3_rr
 
         line.new(bar_index, sl1, bar_index + 20, sl1, color=color.new(color.red, 30), style=line.style_dashed, width=1)
         label.new(bar_index + 20, sl1, "SL1", color=color.new(color.red, 30), textcolor=color.white, style=label.style_label_left, size=size.tiny)
         line.new(bar_index, sl2, bar_index + 20, sl2, color=color.new(color.maroon, 20), style=line.style_dotted, width=1)
         label.new(bar_index + 20, sl2, "SL2", color=color.new(color.maroon, 20), textcolor=color.white, style=label.style_label_left, size=size.tiny)
 
-        line.new(bar_index, tp1, bar_index + 20, tp1, color=color.new(color.green, 30), style=line.style_dashed, width=1)
-        label.new(bar_index + 20, tp1, "TP1", color=color.new(color.green, 0), textcolor=color.white, style=label.style_label_left, size=size.tiny)
-        line.new(bar_index, tp2, bar_index + 20, tp2, color=color.new(color.green, 30), style=line.style_dashed, width=1)
-        label.new(bar_index + 20, tp2, "TP2", color=color.new(color.green, 0), textcolor=color.white, style=label.style_label_left, size=size.tiny)
-        line.new(bar_index, tp3, bar_index + 20, tp3, color=color.new(color.green, 30), style=line.style_dashed, width=1)
-        label.new(bar_index + 20, tp3, "TP3", color=color.new(color.green, 0), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+        // Target Snapping Logic
+        float targetTP1 = entryP - risk * i_tp1_rr
+        float targetTP2 = entryP - risk * i_tp2_rr
+
+        if i_targetSnap
+            float closestHVN = na
+            float maxDen = array.max(volBins)
+            for i = 0 to 49
+                if array.get(volBins, i) > maxDen * 0.7
+                    float p = binsMin + (i / 49 * (binsMax - binsMin))
+                    if p < entryP and (na(closestHVN) or p > closestHVN)
+                        closestHVN := p
+            
+            if not na(closestHVN)
+                targetTP1 := closestHVN
+            
+            targetTP2 := math.min(targetTP2, targetTP1 - risk)
+
+        line.new(bar_index, targetTP1, bar_index + 20, targetTP1, color=color.new(color.green, 30), style=line.style_dashed, width=1)
+        label.new(bar_index + 20, targetTP1, "TP1 (LVL)", color=color.new(color.green, 0), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+        line.new(bar_index, targetTP2, bar_index + 20, targetTP2, color=color.new(color.green, 30), style=line.style_dashed, width=1)
+        label.new(bar_index + 20, targetTP2, "TP2 (ZONE)", color=color.new(color.green, 0), textcolor=color.white, style=label.style_label_left, size=size.tiny)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ALERTS
